@@ -21,7 +21,7 @@ Consuming states do **not** need a `helm` provider configured.
 
 ```hcl
 module "spark" {
-  source = "git::https://github.com/<org>/raics-ai-aws-spark-module.git?ref=v1.0.0"
+  source = "git::https://github.com/vikas-saxena02/raics-ai-aws-spark-module.git?ref=v1.0.0"
 
   cluster_name           = data.terraform_remote_state.base.outputs.cluster_name
   cluster_endpoint       = data.aws_eks_cluster.this.endpoint
