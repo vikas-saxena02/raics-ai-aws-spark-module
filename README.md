@@ -138,6 +138,34 @@ and bringing Spark traffic back under policy enforcement. Verify whether
 Istio's `ENABLE_NATIVE_SIDECARS` is set before building any mutating-webhook
 or Kyverno workaround.
 
+## Tests
+
+```bash
+terraform test
+```
+
+Requires Terraform 1.6+.
+
+The tests are **plan-only** and assert the module's input contract: the chart
+version default, the operator namespace, `atomic = true`, and the two
+safety-relevant defaults (`enable_metrics = false`, `job_namespaces = []`).
+
+### What they do not cover
+
+Plan-only tests never contact a cluster, so they cannot verify:
+
+- that the chart version exists in the upstream repository
+- that the operator actually installs, or that its pods reach Ready
+- that the webhook issues certificates correctly
+- that a `SparkApplication` is picked up in any namespace
+
+Those require a live EKS cluster and are verified manually — see
+"Running Spark in a Kubeflow Profile namespace" for the failure mode most
+likely to appear there.
+
+A `command = apply` test would cover them, but needs a cluster, so it is not
+part of the default test run.
+
 ## Requirements
 
 | Name | Version |
