@@ -82,6 +82,62 @@ condition that activates a known isolation gap:
 Before setting `enable_metrics = true`, curl those paths from one org namespace
 to another and confirm no data is returned.
 
+## Running Spark in a Kubeflow Profile namespace
+
+SparkApplications in a Profile namespace **must** set an annotation on the
+driver, or every executor fails with `ExitCode: 1`:
+
+```yaml
+  driver:
+    annotations:
+      traffic.sidecar.istio.io/excludeInboundPorts: "7078,7079"
+```
+
+7078 is `sparkDriver`, 7079 is the block manager.
+
+### Why
+
+Executors are created by the driver at runtime, and carry
+`sidecar.istio.io/inject: "false"` so they can terminate after shuffles
+(a classic sidecar never exits, so the pod would hang forever).
+
+No sidecar means no mTLS identity. Kubeflow's `ns-owner-access-istio`
+AuthorizationPolicy — created automatically for every Profile — allows
+same-namespace traffic via:
+
+```yaml
+- when:
+  - key: source.namespace
+    values: [org-alpha]
+```
+
+`source.namespace` is *derived from the peer's mTLS identity*. A sidecar-less
+executor presents none, so the value is empty, the rule never matches, and no
+other rule covers a plaintext Spark RPC. The driver's proxy accepts the TCP
+connection and immediately closes it.
+
+Symptom in the executor log: connection to the driver succeeds in ~75ms, then
+`Still have 1 requests outstanding when connection ... is closed`, repeated
+until `Max number of executor failures (3) reached`.
+
+Excluding the ports takes that traffic out of the mesh entirely, so no policy
+is evaluated against it.
+
+### Not reproducible locally
+
+A kind cluster without Kubeflow Profiles has no `ns-owner-access-istio`
+policy, so Spark works there without the annotation. This only appears on a
+Profile-enabled cluster.
+
+### Open item
+
+Kubernetes native sidecars (1.29+, `restartPolicy: Always` init containers)
+terminate with the pod and would let executors join the mesh with a real
+identity — removing the need for both `inject: "false"` and this annotation,
+and bringing Spark traffic back under policy enforcement. Verify whether
+Istio's `ENABLE_NATIVE_SIDECARS` is set before building any mutating-webhook
+or Kyverno workaround.
+
 ## Requirements
 
 | Name | Version |
