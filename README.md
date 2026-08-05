@@ -84,95 +84,47 @@ to another and confirm no data is returned.
 
 ## Running Spark in a Kubeflow Profile namespace
 
-SparkApplications in a Profile namespace **must** set an annotation on the
-driver, or every executor fails with `ExitCode: 1`:
+SparkApplications run in a Profile namespace with no special configuration.
+Use the Profile's built-in ServiceAccount:
 
 ```yaml
   driver:
-    annotations:
-      traffic.sidecar.istio.io/excludeInboundPorts: "7078,7079"
+    serviceAccount: default-editor
 ```
 
-7078 is `sparkDriver`, 7079 is the block manager.
+`default-editor` is created automatically by the Kubeflow Profile controller
+and already carries the pod, service, and configmap permissions a Spark driver
+needs. No additional Role or RoleBinding is required.
 
-### Why
+Executors should **not** set `sidecar.istio.io/inject: "false"`, and the driver
+should **not** set `traffic.sidecar.istio.io/excludeInboundPorts`. Both are
+workarounds for classic Istio sidecars and are unnecessary here.
 
-Executors are created by the driver at runtime, and carry
-`sidecar.istio.io/inject: "false"` so they can terminate after shuffles
-(a classic sidecar never exits, so the pod would hang forever).
+### Why native sidecars matter
 
-No sidecar means no mTLS identity. Kubeflow's `ns-owner-access-istio`
-AuthorizationPolicy — created automatically for every Profile — allows
-same-namespace traffic via:
+Verified on Istio 1.26.1 with `ENABLE_NATIVE_SIDECARS=true`, which the
+vendored Kubeflow manifests set by default.
 
-```yaml
-- when:
-  - key: source.namespace
-    values: [org-alpha]
-```
+A classic Istio sidecar never exits, so a Spark executor that finishes its work
+would hang forever with a running proxy. The usual workaround is to disable
+injection on executors — but that strips their mTLS identity, and Kubeflow's
+`ns-owner-access-istio` AuthorizationPolicy allows same-namespace traffic via
+`source.namespace`, which is *derived from* that identity. Sidecar-less
+executors therefore fail to reach the driver, exiting with ExitCode 1.
 
-`source.namespace` is *derived from the peer's mTLS identity*. A sidecar-less
-executor presents none, so the value is empty, the rule never matches, and no
-other rule covers a plaintext Spark RPC. The driver's proxy accepts the TCP
-connection and immediately closes it.
+Native sidecars (Kubernetes 1.29+) are init containers with
+`restartPolicy: Always`. They start before the app container and terminate with
+the pod, so executors both exit cleanly and carry a real SPIFFE identity.
+`source.namespace` matches, the policy permits the traffic, and Spark's
+driver↔executor RPC stays **inside** the mesh under normal policy enforcement.
 
-Symptom in the executor log: connection to the driver succeeds in ~75ms, then
-`Still have 1 requests outstanding when connection ... is closed`, repeated
-until `Max number of executor failures (3) reached`.
+This is preferable to excluding Spark's ports from the mesh: tenant traffic
+remains authenticated and policy-covered, which matters for IRAP evidence.
 
-Excluding the ports takes that traffic out of the mesh entirely, so no policy
-is evaluated against it.
+### If native sidecars are unavailable
 
-### Not reproducible locally
-
-A kind cluster without Kubeflow Profiles has no `ns-owner-access-istio`
-policy, so Spark works there without the annotation. This only appears on a
-Profile-enabled cluster.
-
-### Open item
-
-Kubernetes native sidecars (1.29+, `restartPolicy: Always` init containers)
-terminate with the pod and would let executors join the mesh with a real
-identity — removing the need for both `inject: "false"` and this annotation,
-and bringing Spark traffic back under policy enforcement. Verify whether
-Istio's `ENABLE_NATIVE_SIDECARS` is set before building any mutating-webhook
-or Kyverno workaround.
-
-## Tests
-
-```bash
-terraform test
-```
-
-Requires Terraform 1.6+.
-
-The tests are **plan-only** and assert the module's input contract: the chart
-version default, the operator namespace, `atomic = true`, and the two
-safety-relevant defaults (`enable_metrics = false`, `job_namespaces = []`).
-
-### What they do not cover
-
-Plan-only tests never contact a cluster, so they cannot verify:
-
-- that the chart version exists in the upstream repository
-- that the operator actually installs, or that its pods reach Ready
-- that the webhook issues certificates correctly
-- that a `SparkApplication` is picked up in any namespace
-
-Those require a live EKS cluster and are verified manually — see
-"Running Spark in a Kubeflow Profile namespace" for the failure mode most
-likely to appear there.
-
-A `command = apply` test would cover them, but needs a cluster, so it is not
-part of the default test run.
-
-## Requirements
-
-| Name | Version |
-|---|---|
-| terraform | tested on 1.15.x |
-| helm provider | `~> 3.0` (v3.2.0) |
-
-Helm provider v3 syntax differs from v2 — provider auth uses a flat
-`kubernetes = { ... }` attribute, and `helm_release` takes `set` as a list
-attribute rather than repeated blocks.
+On a cluster without `ENABLE_NATIVE_SIDECARS=true`, executors need
+`sidecar.istio.io/inject: "false"` and the driver needs
+`traffic.sidecar.istio.io/excludeInboundPorts: "7078,7079"` (7078 is
+`sparkDriver`, 7079 the block manager). That configuration works but takes
+Spark traffic outside mesh enforcement.
